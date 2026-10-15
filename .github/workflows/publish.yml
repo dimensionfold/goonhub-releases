@@ -1,0 +1,45 @@
+# Installed as .github/workflows/publish.yml in dimensionfold/goonhub-releases.
+name: Publish staged APK release
+on:
+  push:
+    branches: ['incoming/**']
+permissions:
+  contents: write
+concurrency:
+  group: public-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate complete payload
+        run: |
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          p = Path('payload')
+          m = json.loads((p / 'update.json').read_text())
+          assert m['schemaVersion'] == 1 and m['versionCode'] > 0
+          assert m['packageName'] == 'cum.goon.goonhub'
+          assert set(m['artifacts']) == {'foss', 'cast'}
+          for a in m['artifacts'].values():
+              data = (p / a['url'].rsplit('/', 1)[1]).read_bytes()
+              assert len(data) == a['size'] and hashlib.sha256(data).hexdigest() == a['sha256']
+          assert (p / m['sourceUrl'].rsplit('/', 1)[1]).is_file()
+          with open('release.env', 'w') as f:
+              f.write('VERSION=' + m['versionName'] + '\n')
+          PY
+          cat release.env >> "$GITHUB_ENV"
+      - name: Upload draft then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --title "Goonhub $VERSION" --notes-file payload/release-notes.md
+          fi
+          gh release upload "$tag" payload/*.apk payload/*-source.tar.gz payload/update.json --clobber
+          gh release edit "$tag" --draft=false --latest --notes-file payload/release-notes.md
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_REF_NAME"
