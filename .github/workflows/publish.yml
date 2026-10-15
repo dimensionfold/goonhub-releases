@@ -37,6 +37,11 @@ jobs:
         run: |
           set -euo pipefail
           tag="v$VERSION"
+          if [ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || true)" = "false" ]; then
+            echo "Release already published; preserving its immutable assets."
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_REF_NAME"
+            exit 0
+          fi
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" --draft --title "Goonhub $VERSION" --notes-file payload/release-notes.md
           fi
