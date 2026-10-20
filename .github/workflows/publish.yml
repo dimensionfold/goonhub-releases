@@ -1,5 +1,5 @@
 # Installed as .github/workflows/publish.yml in dimensionfold/goonhub-releases.
-name: Publish staged APK release
+name: Publish staged app release
 on:
   push:
     branches: ['incoming/**']
@@ -13,6 +13,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Assemble large installers
+        run: |
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          p = Path('payload')
+          transport = p / 'transport.json'
+          if transport.exists():
+              manifest = json.loads((p / 'update.json').read_text())
+              metadata = json.loads(transport.read_text())
+              assert metadata['schemaVersion'] == 1 and len(metadata['files']) == 1
+              record = metadata['files'][0]
+              expected = manifest['artifacts']['windows']
+              name = expected['url'].rsplit('/', 1)[1]
+              assert name == 'goonhub-' + manifest['versionName'] + '-windows-installer.exe'
+              assert record['name'] == name and record['size'] == expected['size']
+              assert record['sha256'] == expected['sha256'] and 0 < record['size'] <= 2 * 1024**3
+              assert 0 < record['chunkSize'] <= 48 * 1024**2
+              assert 0 < len(record['parts']) <= 64
+              assert len(record['parts']) == (record['size'] + record['chunkSize'] - 1) // record['chunkSize']
+              digest = hashlib.sha256()
+              size = 0
+              with (p / name).open('wb') as output:
+                  for index, part in enumerate(record['parts']):
+                      assert part == name + '.part' + str(index).zfill(4)
+                      chunk = (p / part).read_bytes()
+                      assert 0 < len(chunk) <= record['chunkSize']
+                      output.write(chunk)
+                      digest.update(chunk)
+                      size += len(chunk)
+              assert size == expected['size'] and digest.hexdigest() == expected['sha256']
+              for part in record['parts']:
+                  (p / part).unlink()
+              transport.unlink()
+          PY
       - name: Validate complete payload
         run: |
           python3 - <<'PY'
@@ -22,7 +57,7 @@ jobs:
           m = json.loads((p / 'update.json').read_text())
           assert m['schemaVersion'] == 1 and m['versionCode'] > 0
           assert m['packageName'] == 'cum.goon.goonhub'
-          assert set(m['artifacts']) == {'foss', 'cast'}
+          assert set(m['artifacts']) in ({'foss', 'cast'}, {'foss', 'cast', 'windows'})
           for a in m['artifacts'].values():
               data = (p / a['url'].rsplit('/', 1)[1]).read_bytes()
               assert len(data) == a['size'] and hashlib.sha256(data).hexdigest() == a['sha256']
@@ -45,6 +80,8 @@ jobs:
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" --draft --title "Goonhub $VERSION" --notes-file payload/release-notes.md
           fi
-          gh release upload "$tag" payload/*.apk payload/*-source.tar.gz payload/update.json --clobber
+          shopt -s nullglob
+          assets=(payload/*.apk payload/*.exe payload/*-source.tar.gz payload/update.json)
+          gh release upload "$tag" "${assets[@]}" --clobber
           gh release edit "$tag" --draft=false --latest --notes-file payload/release-notes.md
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_REF_NAME"
